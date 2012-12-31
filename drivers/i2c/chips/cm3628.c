@@ -41,7 +41,7 @@
 
 #define D(x...) pr_info(x)
 
-#define I2C_RETRY_COUNT 1
+#define I2C_RETRY_COUNT 10
 
 #define POLLING_PROXIMITY 1
 #define NO_IGNORE_BOOT_MODE 1
@@ -146,6 +146,7 @@ static void psensor_initial_cmd(struct cm3628_info *lpi);
 static int I2C_RxData(uint16_t slaveAddr, uint8_t *rxData, int length)
 {
 	uint8_t loop_i;
+	int val;
 	struct cm3628_info *lpi = lp_info;
 
 	struct i2c_msg msgs[] = {
@@ -168,13 +169,13 @@ static int I2C_RxData(uint16_t slaveAddr, uint8_t *rxData, int length)
 		if (i2c_transfer(lp_info->i2c_client->adapter, msgs, 1) > 0)
 			break;
 
-		/*val = gpio_get_value(lpi->intr_pin);*/
+		val = gpio_get_value(lpi->intr_pin);
 		/*check intr GPIO when i2c error*/
-		if (loop_i == 0 || loop_i == I2C_RETRY_COUNT - 1)
-			D("[PS][CM3628 error] %s, i2c err, slaveAddr 0x%x ISR gpio %d, record_init_fail %d \n",
-				__func__, slaveAddr, lpi->intr_pin, record_init_fail);
+		if (loop_i == 0 || loop_i == I2C_RETRY_COUNT -1)
+			D("[PS][CM3628 error] %s, i2c err, slaveAddr 0x%x ISR gpio %d  = %d, record_init_fail %d \n",
+				__func__, slaveAddr, lpi->intr_pin, val, record_init_fail);
 
-		/*mdelay(1);*/
+		msleep(10);
 	}
 	if (loop_i >= I2C_RETRY_COUNT) {
 		printk(KERN_ERR "[PS_ERR][CM3628 error] %s retry over %d\n",
@@ -188,6 +189,7 @@ static int I2C_RxData(uint16_t slaveAddr, uint8_t *rxData, int length)
 static int I2C_TxData(uint16_t slaveAddr, uint8_t *txData, int length)
 {
 	uint8_t loop_i;
+	int val;
 	struct cm3628_info *lpi = lp_info;
 	struct i2c_msg msg[] = {
 		{
@@ -202,12 +204,13 @@ static int I2C_TxData(uint16_t slaveAddr, uint8_t *txData, int length)
 		if (i2c_transfer(lp_info->i2c_client->adapter, msg, 1) > 0)
 			break;
 
+		val = gpio_get_value(lpi->intr_pin);
 		/*check intr GPIO when i2c error*/
-		if (loop_i == 0 || loop_i == I2C_RETRY_COUNT - 1)
-			D("[PS][CM3628 error] %s, i2c err, slaveAddr 0x%x, register 0x%x, value 0x%x, ISR gpio%d, record_init_fail %d\n",
-				__func__, slaveAddr, txData[0], txData[1], lpi->intr_pin, record_init_fail);
+		if (loop_i == 0 || loop_i == I2C_RETRY_COUNT -1)
+			D("[PS][CM3628 error] %s, i2c err, slaveAddr 0x%x, register 0x%x, value 0x%x, ISR gpio%d  = %d, record_init_fail %d\n",
+				__func__, slaveAddr, txData[0], txData[1], lpi->intr_pin, val, record_init_fail);
 
-		/*mdelay(1);*/
+		msleep(10);
 	}
 
 	if (loop_i >= I2C_RETRY_COUNT) {
@@ -468,49 +471,34 @@ static void enable_als_int(void)/*enable als interrupt*/
 static void report_lsensor_input_event(struct cm3628_info *lpi, bool resume)
 {/*when resume need report a data, so the paramerter need to quick reponse*/
 	uint16_t adc_value = 0;
-	int level = 0, i, ret = 0;
+	int level = 0, ret = 0, cali_value;
 
 	mutex_lock(&als_get_adc_mutex);
 
 	ret = get_ls_adc_value(&adc_value, resume);
 	if (resume)
-		adc_value = adc_value*8;/*because the CM3628_ALS_IT for 400ms - >50ms*/
+		adc_value = adc_value<<3;/*because the CM3628_ALS_IT for 400ms - >50ms*/
+	cali_value = lpi->ls_calibrate ? adc_value * lpi->als_kadc / lpi->als_gadc : adc_value;
+	cali_value >>= 2;/*adjust value to better match real Lux value*/
 
-	for (i = 0; i < 10; i++) {
-		if (adc_value <= (*(lpi->adc_table + i))) {
-			level = i;
-			if (*(lpi->adc_table + i))
-				break;
-		}
-		if (i == 9) {/*avoid  i = 10, because 'cali_table' of size is 10 */
-			level = i;
-			break;
-		}
-	}
-	ret = set_lsensor_range(((i == 0) || (adc_value == 0)) ? 0 :
-			*(lpi->cali_table + (i - 1)) + 1,
-		*(lpi->cali_table + i));
+	ret = set_lsensor_range(adc_value * 10 / 12, adc_value * 12 / 10);/*trigger IRQ on +/- 20% light level change*/
 
 	if (ret < 0)
 		printk(KERN_ERR "[LS][CM3628 error] %s fail\n", __func__);
 
-	if ((i == 0) || (adc_value == 0))
-		D("[LS][CM3628] %s: ADC=0x%03X, Level=%d, l_thd equal 0, h_thd = 0x%x \n",
-			__func__, adc_value, level, *(lpi->cali_table + i));
-	else
-		D("[LS][CM3628] %s: ADC=0x%03X, Level=%d, l_thd = 0x%x, h_thd = 0x%x \n",
-			__func__, adc_value, level, *(lpi->cali_table + (i - 1)) + 1, *(lpi->cali_table + i));
-
-	lpi->current_level = level;
+	D("[LS][CM3628] %s: ADC=0x%03X, Level=%d, l_thd = 0x%x, h_thd = 0x%x \n",
+			__func__, adc_value, cali_value, adc_value * 10 / 12, adc_value * 12 / 10);
+	lpi->current_level = cali_value;
 	lpi->current_adc = adc_value;
 	/*D("[CM3628] %s: *(lpi->cali_table + (i - 1)) + 1 = 0x%X, *(lpi->cali_table + i) = 0x%x \n", __func__, *(lpi->cali_table + (i - 1)) + 1, *(lpi->cali_table + i));*/
-	if (fLevel >= 0) {
-		D("[LS][CM3628] L-sensor force level enable level=%d fLevel=%d\n",
-			level, fLevel);
-		level = fLevel;
+	if(fLevel>=0){
+		D("[LS][CM3628] L-sensor force level enable level=%d fLevel=%d\n",level,fLevel);
+		level=fLevel;
 	}
-	input_report_abs(lpi->ls_input_dev, ABS_MISC, level);
-	input_sync(lpi->ls_input_dev);
+	if ((!resume) || (cali_value == 0)) {
+		input_report_abs(lpi->ls_input_dev, ABS_MISC, cali_value);
+		input_sync(lpi->ls_input_dev);
+	}
 	enable_als_int();
 	mutex_unlock(&als_get_adc_mutex);
 
@@ -994,6 +982,7 @@ static int lightsensor_enable(struct cm3628_info *lpi)
 {
 	int ret = 0;
 	uint8_t cmd = 0;
+	uint16_t bogus = 0;
 
 	mutex_lock(&als_enable_mutex);
 	D("[LS][CM3628] %s\n", __func__);
@@ -1012,6 +1001,7 @@ static int lightsensor_enable(struct cm3628_info *lpi)
 		*/
 		input_report_abs(lpi->ls_input_dev, ABS_MISC, -1);
 		input_sync(lpi->ls_input_dev);
+		get_ls_adc_value(&bogus, 1);/*ignore first ADC value*/
 		report_lsensor_input_event(lpi, 1);/*resume, IOCTL and DEVICE_ATTR*/
 	}
 
@@ -1175,7 +1165,7 @@ static ssize_t ps_enable_store(struct device *dev,
 }
 
 static DEVICE_ATTR(ps_adc, 0664, ps_adc_show, ps_enable_store);
-/*
+
 unsigned PS_cmd_test_value;
 static ssize_t ps_parameters_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
@@ -1204,8 +1194,8 @@ static ssize_t ps_parameters_store(struct device *dev,
 	for (i = 0; i < 2; i++)
 		token[i] = strsep((char **)&buf, " ");
 
-	lpi->ps_thd_set = strict_strtoul(token[0], 16);
-	PS_cmd_test_value = strict_strtoul(token[1], 16);
+	lpi->ps_thd_set = simple_strtoul(token[0], NULL, 16);
+	PS_cmd_test_value = simple_strtoul(token[1], NULL, 16);
 	printk(KERN_INFO
 		"[PS][CM3628]Set lpi->ps_thd_set = 0x%x, PS_cmd_cmd:value = 0x%x\n",
 		lp_info->ps_thd_set, PS_cmd_test_value);
@@ -1218,7 +1208,7 @@ static ssize_t ps_parameters_store(struct device *dev,
 
 static DEVICE_ATTR(ps_parameters, 0664,
 	ps_parameters_show, ps_parameters_store);
-*/
+
 static ssize_t ps_kadc_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
 {
@@ -1554,7 +1544,7 @@ static ssize_t ls_kadc_store(struct device *dev,
 }
 
 static DEVICE_ATTR(ls_kadc, 0664, ls_kadc_show, ls_kadc_store);
-/*
+
 static ssize_t ls_adc_table_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
 {
@@ -1585,7 +1575,7 @@ static ssize_t ls_adc_table_store(struct device *dev,
 	printk(KERN_INFO "[LS][CM3628]%s\n", buf);
 	for (i = 0; i < 10; i++) {
 		token[i] = strsep((char **)&buf, " ");
-		tempdata[i] = strict_strtoul(token[i], 16);
+		tempdata[i] = simple_strtoul(token[i], NULL, 16);
 		if (tempdata[i] < 1 || tempdata[i] > 0xffff) {
 			printk(KERN_ERR
 			"[LS][CM3628 error] adc_table[%d] =  0x%x Err\n",
@@ -1611,7 +1601,7 @@ static ssize_t ls_adc_table_store(struct device *dev,
 
 static DEVICE_ATTR(ls_adc_table, 0664,
 	ls_adc_table_show, ls_adc_table_store);
-*/
+
 static uint8_t ALS_CONF1;
 static ssize_t ls_conf1_show(struct device *dev,
 				  struct device_attribute *attr, char *buf)
@@ -1691,7 +1681,7 @@ static int lightsensor_setup(struct cm3628_info *lpi)
 	}
 	lpi->ls_input_dev->name = "lightsensor-level";
 	set_bit(EV_ABS, lpi->ls_input_dev->evbit);
-	input_set_abs_params(lpi->ls_input_dev, ABS_MISC, 0, 9, 0, 0);
+	input_set_abs_params(lpi->ls_input_dev, ABS_MISC, 0, 0xffff, 0, 0);
 
 	ret = input_register_device(lpi->ls_input_dev);
 	if (ret < 0) {
@@ -1774,23 +1764,23 @@ check_interrupt_gpio:
 	}
 	ret = _cm3628_I2C_Write_Byte(lpi->ALS_slave_address,
 			ALS_cmd_cmd, CM3628_ALS_BIT2_Default_1);/*0x04 bit[3:2] */
-	if ((ret < 0) && (fail_counter < 4)) {
+	if ((ret < 0) && (fail_counter < 10)) {
 		fail_counter++;
-		/*val = gpio_get_value_cansleep(lpi->intr_pin);
+		val = gpio_get_value(lpi->intr_pin);
 		D("[LS][CM3628] %s, interrupt GPIO val = %d, , inital fail_counter %d\n",
-			__func__, val, fail_counter);*/
+			__func__, val, fail_counter);
 		goto	check_interrupt_gpio;
 	}
 	ret = _cm3628_I2C_Write_Byte(lpi->PS_slave_address,
 		PS_cmd_cmd, 0x00);/*first init need 0x0*/
-	if ((ret < 0) && (fail_counter < 4)) {
+	if ((ret < 0) && (fail_counter < 10)) {
 		fail_counter++;
-		/*val = gpio_get_value_cansleep(lpi->intr_pin);
+		val = gpio_get_value(lpi->intr_pin);
 		D("[PS][CM3628] %s, interrupt GPIO val = %d, , inital fail_counter %d\n",
-			__func__, val, fail_counter);*/
+			__func__, val, fail_counter);
 		goto	check_interrupt_gpio;
 	}
-	if (fail_counter >= 4) {
+	if (fail_counter >= 10) {
 		D("[PS][CM3628] %s, initial fail_counter = %d\n", __func__, fail_counter);
 		if (record_init_fail == 0)
 			record_init_fail = 1;
@@ -2037,9 +2027,9 @@ static int cm3628_probe(struct i2c_client *client,
 	if (ret)
 		goto err_create_ls_device_file;
 
-	/*ret = device_create_file(lpi->ls_dev, &dev_attr_ls_adc_table);
+	ret = device_create_file(lpi->ls_dev, &dev_attr_ls_adc_table);
 	if (ret)
-		goto err_create_ls_device_file;*/
+		goto err_create_ls_device_file;
 
 	ret = device_create_file(lpi->ls_dev, &dev_attr_ls_conf1);
 	if (ret)
@@ -2066,11 +2056,11 @@ static int cm3628_probe(struct i2c_client *client,
 	if (ret)
 		goto err_create_ps_device;
 
-	/*ret = device_create_file(lpi->ps_dev,
+	ret = device_create_file(lpi->ps_dev,
 		&dev_attr_ps_parameters);
 	if (ret)
 		goto err_create_ps_device;
-*/
+
 	/* register the attributes */
 	ret = device_create_file(lpi->ps_dev, &dev_attr_ps_kadc);
 	if (ret)
