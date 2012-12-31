@@ -90,7 +90,7 @@ config MT9D112
 
 config IMX105
 	bool "Sensor IMX105 MIPI (BAYER 8M)"
-	depends on MSM_CAMERA && (ARCH_MSM8X60 || ARCH_MSM8960)
+	depends on MSM_CAMERA && ARCH_MSM8X60
 	default n
 	---help---
 	  SONY 8M MIPI Sensor with Autofocus
