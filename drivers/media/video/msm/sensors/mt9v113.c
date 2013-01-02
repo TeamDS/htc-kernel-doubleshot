@@ -2368,7 +2368,6 @@ probe_suspend_fail_retry:
 
 
 probe_done:
-	pr_info("[CAM]%s %s:%d\n", __FILE__, __func__, __LINE__);
 	return rc;
 probe_fail_close_pwr:
 #ifdef CONFIG_MSM_CAMERA_8X60
